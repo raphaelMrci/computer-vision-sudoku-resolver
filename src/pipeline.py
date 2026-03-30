@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
-from itertools import combinations
 import time
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from src.automation.interface import fill_grid
 from src.detection.interface import CellBox, crop_cell, detect_cells
 from src.ocr.tesseract import read_digit_candidates_tesseract_relaxed, read_digit_with_confidence_tesseract
 from src.solver.backtracking import count_solutions_with_budget, solve_sudoku_with_budget
@@ -154,147 +151,6 @@ def _is_consistent(grid: List[List[int]]) -> bool:
     return True
 
 
-def _attempt_solve_with_relaxation(
-    initial: List[List[int]],
-    confidence: List[List[float]],
-) -> Tuple[bool, List[List[int]], List[List[int]], int, int]:
-    """
-    Try solving with all OCR clues first; if it fails, progressively remove the
-    lowest-confidence clues and retry.
-
-    Returns:
-        (is_solved, solved_grid, clues_used_grid, num_removed_clues)
-    """
-    clue_cells = [(r, c, confidence[r][c]) for r in range(9) for c in range(9) if initial[r][c] != 0]
-    clue_cells.sort(key=lambda item: item[2])  # lowest confidence first
-    search_start = time.perf_counter()
-    max_search_ms = 900.0
-    solve_budget_nodes = 500_000
-    count_budget_nodes = 30_000
-
-    def timed_out() -> bool:
-        return ((time.perf_counter() - search_start) * 1000.0) > max_search_ms
-
-    def try_with_grid(clues_used: List[List[int]], removed_count: int) -> Optional[Tuple[List[List[int]], List[List[int]], int, int]]:
-        if _count_clues(clues_used) < 17:
-            return None
-        if not _is_consistent(clues_used):
-            return None
-        solutions, count_exhausted = count_solutions_with_budget(
-            [row[:] for row in clues_used], limit=2, max_nodes=count_budget_nodes
-        )
-        # If counting times out, continue with solve-first strategy.
-        # For OCR-valid grids this is often enough and much faster.
-        if not count_exhausted and solutions >= 2:
-            return None
-
-        solved = [row[:] for row in clues_used]
-        solved_ok, solve_exhausted = solve_sudoku_with_budget(solved, max_nodes=solve_budget_nodes)
-        if solve_exhausted or not solved_ok:
-            return None
-        return solved, clues_used, removed_count, (solutions if not count_exhausted else 1)
-
-    def try_with_removed(removed_coords: List[Tuple[int, int]]) -> Optional[Tuple[List[List[int]], List[List[int]], int, int]]:
-        clues_used = [row[:] for row in initial]
-        for r, c in removed_coords:
-            clues_used[r][c] = 0
-        return try_with_grid(clues_used, removed_count=len(removed_coords))
-
-    def value_candidates(grid: List[List[int]], row: int, col: int) -> List[int]:
-        current = grid[row][col]
-        grid[row][col] = 0
-        used = set()
-        used.update(grid[row][x] for x in range(9))
-        used.update(grid[y][col] for y in range(9))
-        box_row = (row // 3) * 3
-        box_col = (col // 3) * 3
-        for y in range(box_row, box_row + 3):
-            for x in range(box_col, box_col + 3):
-                used.add(grid[y][x])
-        grid[row][col] = current
-        return [v for v in range(1, 10) if v not in used]
-
-    # Phase 1: fast baseline schedules (current behavior).
-    removal_schedule = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12]
-    for remove_count in removal_schedule:
-        if timed_out():
-            return False, [row[:] for row in initial], [row[:] for row in initial], 0, 0
-        if remove_count > len(clue_cells):
-            continue
-        removed = [(r, c) for (r, c, _) in clue_cells[:remove_count]]
-        tried = try_with_removed(removed)
-        if tried is not None:
-            solved, clues_used, removed_count, solutions = tried
-            return True, solved, clues_used, removed_count, solutions
-
-    # Phase 2: robust search for hard patterns.
-    # Try combinations of uncertain clues (not only strict prefixes).
-    pool_size = min(10, len(clue_cells))
-    pool = [(r, c) for (r, c, _) in clue_cells[:pool_size]]
-    max_combo_trials = 180
-    combo_trials = 0
-    for remove_count in (1, 2):
-        for subset in combinations(pool, remove_count):
-            combo_trials += 1
-            if combo_trials > max_combo_trials or timed_out():
-                return False, [row[:] for row in initial], [row[:] for row in initial], 0, 0
-            tried = try_with_removed(list(subset))
-            if tried is not None:
-                solved, clues_used, removed_count, solutions = tried
-                return True, solved, clues_used, removed_count, solutions
-
-    # Phase 3: OCR clue repair.
-    # Replace one uncertain clue with another candidate digit and retry.
-    repair_pool_size = min(10, len(clue_cells))
-    repair_pool = [(r, c, initial[r][c]) for (r, c, _) in clue_cells[:repair_pool_size]]
-    for r, c, original in repair_pool:
-        if timed_out():
-            return False, [row[:] for row in initial], [row[:] for row in initial], 0, 0
-        clues_used = [row[:] for row in initial]
-        candidates = value_candidates(clues_used, r, c)
-        for value in candidates:
-            if timed_out():
-                return False, [row[:] for row in initial], [row[:] for row in initial], 0, 0
-            if value == original:
-                continue
-            clues_used[r][c] = value
-            tried = try_with_grid(clues_used, removed_count=0)
-            if tried is not None:
-                solved, repaired_grid, removed_count, solutions = tried
-                return True, solved, repaired_grid, removed_count, solutions
-
-    # Phase 4: two-clue repair (hard cases).
-    # Bound the search to keep runtime acceptable.
-    pair_pool_size = min(8, len(repair_pool))
-    pair_pool = repair_pool[:pair_pool_size]
-    search_budget = 220
-    checked = 0
-    for (r1, c1, orig1), (r2, c2, orig2) in combinations(pair_pool, 2):
-        if timed_out():
-            return False, [row[:] for row in initial], [row[:] for row in initial], 0, 0
-        base = [row[:] for row in initial]
-        cand1 = [v for v in value_candidates(base, r1, c1) if v != orig1]
-        if not cand1:
-            continue
-        cand2 = [v for v in value_candidates(base, r2, c2) if v != orig2]
-        if not cand2:
-            continue
-        for v1 in cand1:
-            for v2 in cand2:
-                checked += 1
-                if checked > search_budget or timed_out():
-                    return False, [row[:] for row in initial], [row[:] for row in initial], 0, 0
-                clues_used = [row[:] for row in initial]
-                clues_used[r1][c1] = v1
-                clues_used[r2][c2] = v2
-                tried = try_with_grid(clues_used, removed_count=0)
-                if tried is not None:
-                    solved, repaired_grid, removed_count, solutions = tried
-                    return True, solved, repaired_grid, removed_count, solutions
-
-    return False, [row[:] for row in initial], [row[:] for row in initial], 0, 0
-
-
 def _render_debug_overlay(
     image: np.ndarray,
     boxes: List[CellBox],
@@ -326,7 +182,7 @@ def _render_debug_overlay(
 def _run_pipeline_internal(
     image: np.ndarray,
     with_debug_overlay: bool = False,
-    ocr_mode: str = "advanced",
+    ocr_mode: str = "tesseract",
 ) -> Tuple[Dict[str, object], Optional[np.ndarray]]:
     t_start = time.perf_counter()
     # Pipeline is intentionally tesseract-only now.
@@ -567,16 +423,3 @@ def run_pipeline_from_grid(
         ocr_mode=ocr_mode,
         num_cells_detected=81,
     )
-
-
-def _demo() -> None:
-    # Demo image placeholder (black square); replace with screenshot pipeline.
-    image = np.zeros((900, 900, 3), dtype=np.uint8)
-    result = run_pipeline(image)
-    print(json.dumps(result, indent=2))
-    if result["solved"]:
-        fill_grid(result["actions"])
-
-
-if __name__ == "__main__":
-    _demo()

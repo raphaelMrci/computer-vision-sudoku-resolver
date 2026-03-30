@@ -38,9 +38,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--ocr-mode",
-        default="hybrid",
-        choices=["advanced", "basic", "hybrid", "cnn", "hybrid_cnn", "tesseract", "hybrid_tesseract"],
-        help="OCR mode used when --prefill-ocr is enabled.",
+        default="tesseract",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--relative-paths",
@@ -70,6 +69,9 @@ def main() -> int:
         return 1
 
     args = parse_args()
+    if str(args.ocr_mode).lower() != "tesseract":
+        print(f"Ignoring --ocr-mode={args.ocr_mode}; forced to tesseract.")
+        args.ocr_mode = "tesseract"
     input_dir = Path(args.input_dir)
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
