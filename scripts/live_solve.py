@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-import argparse
+import io
 import json
+import socket
 import time
+import urllib.error
+import urllib.request
+import uuid
 from typing import List, Tuple
 
 import numpy as np
@@ -11,20 +15,15 @@ from PIL import Image
 from src.automation.interface import GridCalibration, fill_grid
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Live Sudoku solve (simple flow, Tesseract OCR only).")
-    parser.add_argument("--ocr-mode", default="tesseract", help=argparse.SUPPRESS)
-    parser.add_argument("--rescue-attempts", type=int, default=0, help=argparse.SUPPRESS)
-    parser.add_argument("--x", type=int, help="Grid top-left x in screen coordinates.")
-    parser.add_argument("--y", type=int, help="Grid top-left y in screen coordinates.")
-    parser.add_argument("--size", type=int, help="Grid side length in pixels.")
-    parser.add_argument("--min-clues", type=int, default=17, help="Minimum detected clues to allow auto-fill.")
-    parser.add_argument("--countdown", type=int, default=3, help="Countdown before capture/fill.")
-    parser.add_argument("--allow-relaxed", action="store_true", help="Allow auto-fill when status is ok_relaxed.")
-    parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt.")
-    parser.add_argument("--dry-run", action="store_true", help="Do not click/type, print actions only.")
-    parser.add_argument("--quiet", action="store_true", help="Reduce stage logs.")
-    return parser.parse_args()
+API_URL = "http://localhost:8080/predict"
+API_TIMEOUT_S = 120.0
+MIN_CLUES = 17
+COUNTDOWN_S = 3
+
+
+def _log(message: str) -> None:
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] {message}")
 
 
 def _require_pyautogui():
@@ -41,13 +40,6 @@ def _countdown(seconds: int, message: str) -> None:
     for i in range(seconds, 0, -1):
         print(f"{message} in {i}...")
         time.sleep(1)
-
-
-def _log(enabled: bool, message: str) -> None:
-    if not enabled:
-        return
-    ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {message}")
 
 
 def _capture_region(pyautogui, calibration: GridCalibration) -> np.ndarray:
@@ -80,79 +72,54 @@ def _parse_actions(raw_actions: object) -> List[Tuple[int, int, int]]:
     for item in raw_actions:
         if not isinstance(item, (list, tuple)) or len(item) != 3:
             continue
-        row, col, value = int(item[0]), int(item[1]), int(item[2])
-        actions.append((row, col, value))
+        actions.append((int(item[0]), int(item[1]), int(item[2])))
     return actions
 
 
-def _parse_confidence_grid(raw_grid: object) -> List[List[float]]:
-    if not isinstance(raw_grid, list) or len(raw_grid) != 9:
-        return [[0.0 for _ in range(9)] for _ in range(9)]
-    parsed: List[List[float]] = []
-    for row in raw_grid:
-        if not isinstance(row, list) or len(row) != 9:
-            return [[0.0 for _ in range(9)] for _ in range(9)]
-        parsed.append([float(v) for v in row])
-    return parsed
+def _encode_multipart_formdata(field_name: str, filename: str, data: bytes, content_type: str) -> tuple[bytes, str]:
+    boundary = f"----sudoku-live-{uuid.uuid4().hex}"
+    parts = [
+        f"--{boundary}\r\n".encode("utf-8"),
+        f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode("utf-8"),
+        f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"),
+        data,
+        b"\r\n",
+        f"--{boundary}--\r\n".encode("utf-8"),
+    ]
+    return b"".join(parts), boundary
 
 
-def _parse_grid(raw_grid: object) -> List[List[int]]:
-    if not isinstance(raw_grid, list) or len(raw_grid) != 9:
-        return [[0 for _ in range(9)] for _ in range(9)]
-    parsed: List[List[int]] = []
-    for row in raw_grid:
-        if not isinstance(row, list) or len(row) != 9:
-            return [[0 for _ in range(9)] for _ in range(9)]
-        parsed.append([int(v) for v in row])
-    return parsed
-
-
-def _reconcile_givens(
-    primary: dict,
-    verify: dict,
-) -> Tuple[List[List[int]], List[List[float]], int]:
-    primary_grid = _parse_grid(primary.get("initial_grid"))
-    primary_conf = _parse_confidence_grid(primary.get("confidence_grid"))
-    verify_grid = _parse_grid(verify.get("initial_grid"))
-    verify_conf = _parse_confidence_grid(verify.get("confidence_grid"))
-
-    merged_grid = [row[:] for row in primary_grid]
-    merged_conf = [row[:] for row in primary_conf]
-    changes = 0
-    for r in range(9):
-        for c in range(9):
-            p = primary_grid[r][c]
-            pc = primary_conf[r][c]
-            v = verify_grid[r][c]
-            vc = verify_conf[r][c]
-            # Recover likely missed givens from a second OCR pass.
-            if p == 0 and v != 0 and vc >= 0.72:
-                merged_grid[r][c] = v
-                merged_conf[r][c] = vc
-                changes += 1
-            # Resolve disagreements by trusting clearly stronger confidence.
-            elif p != 0 and v != 0 and p != v and vc >= pc + 0.10 and vc >= 0.86:
-                merged_grid[r][c] = v
-                merged_conf[r][c] = vc
-                changes += 1
-    return merged_grid, merged_conf, changes
-
-
-def _result_rank(result: dict) -> Tuple[int, int, int]:
-    solved = 1 if bool(result.get("solved", False)) else 0
-    unique = 1 if int(result.get("solution_count_capped", 0)) == 1 else 0
-    clues = int(result.get("num_clues_detected", 0))
-    return solved, unique, clues
+def _predict_via_api(image: np.ndarray) -> dict:
+    pil = Image.fromarray(image)
+    buffer = io.BytesIO()
+    pil.save(buffer, format="PNG")
+    body, boundary = _encode_multipart_formdata("file", "capture.png", buffer.getvalue(), "image/png")
+    req = urllib.request.Request(
+        API_URL,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT_S) as resp:
+            payload = resp.read()
+            code = resp.getcode()
+    except (TimeoutError, socket.timeout) as exc:
+        raise RuntimeError(
+            f"API timeout after {API_TIMEOUT_S:.0f}s. Make sure solver API is running: {API_URL}"
+        ) from exc
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"API HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"API unreachable: {exc}") from exc
+    if code != 200:
+        raise RuntimeError(f"API returned HTTP {code}: {payload.decode('utf-8', errors='replace')}")
+    return json.loads(payload.decode("utf-8"))
 
 
 def _build_cell_centers(calibration: GridCalibration, image: np.ndarray) -> dict[Tuple[int, int], Tuple[int, int]]:
-    try:
-        from src.detection.interface import detect_cells
-    except ModuleNotFoundError as exc:  # pragma: no cover
-        missing = getattr(exc, "name", "dependency")
-        raise RuntimeError(
-            f"Missing dependency: {missing}. Install project dependencies first with `make install`."
-        ) from exc
+    from src.detection.interface import detect_cells
 
     centers: dict[Tuple[int, int], Tuple[int, int]] = {}
     for box in detect_cells(image):
@@ -164,136 +131,67 @@ def _build_cell_centers(calibration: GridCalibration, image: np.ndarray) -> dict
 
 def main() -> int:
     t_main_start = time.perf_counter()
-    args = parse_args()
-    verbose = not args.quiet
-    _log(verbose, "Starting live_solve.")
+    _log("Starting live_solve client.")
     pyautogui = _require_pyautogui()
-    _log(verbose, "pyautogui ready.")
-    try:
-        from src.pipeline import run_pipeline
-        from src.pipeline import run_pipeline_from_grid
-        from src.ocr.tesseract import _has_tesseract
-    except ModuleNotFoundError as exc:  # pragma: no cover
-        missing = getattr(exc, "name", "dependency")
-        print(f"Missing dependency: {missing}")
-        print("Install project dependencies first: `make install`")
-        return 1
+    _log("pyautogui ready.")
 
-    ocr_mode = "tesseract"
-    if str(args.ocr_mode).lower() != "tesseract":
-        _log(verbose, f"Ignoring --ocr-mode={args.ocr_mode}; forced to tesseract.")
-    _log(verbose, f"OCR mode fixed: {ocr_mode}")
-    if not _has_tesseract():
-        print("Abort: tesseract backend not found.")
-        print("Install tesseract binary or add it to PATH, then retry.")
-        return 1
-    if args.x is not None and args.y is not None and args.size is not None:
-        calibration = GridCalibration(x=args.x, y=args.y, size=args.size)
-        _log(verbose, f"Calibration provided by CLI: x={args.x}, y={args.y}, size={args.size}")
-    else:
-        _log(verbose, "Interactive calibration started.")
-        calibration = _interactive_calibration(pyautogui)
-        _log(verbose, "Interactive calibration done.")
+    _log("Interactive calibration started.")
+    calibration = _interactive_calibration(pyautogui)
+    _log("Interactive calibration done.")
 
-    _log(verbose, "Capture phase started.")
-    _countdown(args.countdown, "Capturing grid")
+    _log("Capture phase started.")
+    _countdown(COUNTDOWN_S, "Capturing grid")
     t0 = time.perf_counter()
     image = _capture_region(pyautogui, calibration)
     capture_ms = (time.perf_counter() - t0) * 1000.0
-    _log(verbose, f"Capture done ({capture_ms:.1f} ms).")
+    _log(f"Capture done ({capture_ms:.1f} ms).")
 
-    _log(verbose, "Running primary inference...")
+    _log("Calling solver API...")
     t0 = time.perf_counter()
-    result = run_pipeline(image, ocr_mode=ocr_mode)
-    first_infer_ms = (time.perf_counter() - t0) * 1000.0
+    try:
+        result = _predict_via_api(image)
+    except RuntimeError as exc:
+        print(str(exc))
+        print("Quick checks:")
+        print("- curl http://localhost:8080/health")
+        print("- make docker-run  (or make api)")
+        return 1
+    infer_ms = (time.perf_counter() - t0) * 1000.0
     _log(
-        verbose,
-        "Primary inference done "
-        f"(status={result.get('status')}, solved={result.get('solved')}, clues={result.get('num_clues_detected')}, "
-        f"time={first_infer_ms:.1f} ms).",
+        f"API inference done (status={result.get('status')}, solved={result.get('solved')}, "
+        f"clues={result.get('num_clues_detected')}, time={infer_ms:.1f} ms)."
     )
 
-    # If solve is ambiguous/unsolved, recover missing givens before aborting.
-    for verify_idx in range(2):
-        solved = bool(result.get("solved", False))
-        unique = int(result.get("solution_count_capped", 0)) == 1
-        if solved and unique:
-            break
-        _log(verbose, f"Given-verification OCR pass #{verify_idx + 1}...")
-        verify_image = _capture_region(pyautogui, calibration)
-        verify = run_pipeline(verify_image, ocr_mode=ocr_mode)
-        merged_grid, merged_conf, merged_changes = _reconcile_givens(result, verify)
-        if merged_changes > 0:
-            _log(verbose, f"Recovered/updated {merged_changes} givens; re-solving.")
-            result = run_pipeline_from_grid(merged_grid, merged_conf, ocr_mode=ocr_mode)
-            image = verify_image
-            continue
-        # No merge diff: still keep better direct pass if it improves.
-        if _result_rank(verify) > _result_rank(result):
-            _log(verbose, "Verification pass produced a better candidate.")
-            result = verify
-            image = verify_image
-        else:
-            _log(verbose, "Verification pass did not improve result.")
     print(json.dumps(result, indent=2))
-    print(
-        "timings_ms "
-        f"capture={capture_ms:.1f} "
-        f"first_infer={first_infer_ms:.1f} "
-        "rescue_infer_total=0.0 "
-        "rescue_runs=0"
-    )
+    print(f"timings_ms capture={capture_ms:.1f} infer={infer_ms:.1f}")
 
-    status = result.get("status")
-    clues = int(result.get("num_clues_detected", 0))
+    status = str(result.get("status", "unknown"))
     solved = bool(result.get("solved", False))
+    clues = int(result.get("num_clues_detected", 0))
     actions = _parse_actions(result.get("actions"))
-    cell_centers = _build_cell_centers(calibration, image)
-    print(f"parsed_actions={len(actions)} detected_cell_centers={len(cell_centers)}")
-    _log(
-        verbose,
-        f"Validation gate: status={status}, solved={solved}, clues={clues}, actions={len(actions)}",
-    )
+    centers = _build_cell_centers(calibration, image)
+    print(f"parsed_actions={len(actions)} detected_cell_centers={len(centers)}")
+    _log(f"Validation gate: status={status}, solved={solved}, clues={clues}, actions={len(actions)}")
 
-    allowed_status = {"ok", "ok_relaxed"} if args.allow_relaxed else {"ok"}
-    if not solved or not actions or status not in allowed_status:
+    if not solved or not actions or status != "ok":
         print("Abort: puzzle not in a safe solved state.")
-        _log(verbose, "Abort at safety gate: unsafe solved state.")
+        return 1
+    if clues < MIN_CLUES:
+        print(f"Abort: detected clues {clues} < min-clues {MIN_CLUES}.")
         return 1
 
-    if clues < args.min_clues:
-        print(f"Abort: detected clues {clues} < min-clues {args.min_clues}.")
-        _log(verbose, "Abort at min-clues gate.")
-        return 1
-
-    if args.dry_run:
-        _log(verbose, "Dry-run enabled; printing actions only.")
-        fill_grid(actions, calibration=None)
-        return 0
-
-    if not args.yes:
-        print("Ready to auto-fill browser now. Type 'yes' to continue:")
-        if input().strip().lower() != "yes":
-            print("Cancelled.")
-            _log(verbose, "Cancelled by user before autofill.")
-            return 0
-
-    _log(verbose, "Autofill phase started.")
-    _countdown(args.countdown, "Auto-fill starts")
-    # Prime browser focus before typing.
-    if cell_centers:
-        first_key = next(iter(cell_centers.keys()))
-        fx, fy = cell_centers[first_key]
+    _countdown(COUNTDOWN_S, "Auto-fill starts")
+    if centers:
+        k = next(iter(centers))
+        fx, fy = centers[k]
         pyautogui.click(fx, fy, interval=0.06)
         time.sleep(0.08)
-    t_fill_start = time.perf_counter()
-    fill_grid(actions, calibration=calibration, cell_centers=cell_centers, click_interval_s=0.06, key_interval_s=0.03)
-    _log(verbose, "Autofill completed.")
 
+    t_fill = time.perf_counter()
+    fill_grid(actions, calibration=calibration, cell_centers=centers, click_interval_s=0.06, key_interval_s=0.03)
+    fill_ms = (time.perf_counter() - t_fill) * 1000.0
     total_ms = (time.perf_counter() - t_main_start) * 1000.0
-    fill_ms = (time.perf_counter() - t_fill_start) * 1000.0
     print(f"timings_ms fill_phase={fill_ms:.1f} total={total_ms:.1f}")
-    _log(verbose, f"Done. fill_phase={fill_ms:.1f}ms total={total_ms:.1f}ms")
     print("Done.")
     return 0
 

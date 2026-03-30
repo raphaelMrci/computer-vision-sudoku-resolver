@@ -49,9 +49,8 @@ def predict():
     if err is not None:
         return err
 
-    ocr_mode = "tesseract"
     try:
-        result = run_pipeline(image, ocr_mode=ocr_mode)
+        result = run_pipeline(image)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify(result), 200
@@ -63,9 +62,8 @@ def predict_debug():
     if err is not None:
         return err
 
-    ocr_mode = "tesseract"
     try:
-        result, debug_image = run_pipeline_debug(image, ocr_mode=ocr_mode)
+        result, debug_image = run_pipeline_debug(image)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     image_bgr = debug_image[:, :, ::-1]

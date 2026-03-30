@@ -1,15 +1,20 @@
 # Computer Vision Sudoku Solver
 
-Vision-only Sudoku solver for `https://sudoku.com/` with a simplified stack:
+Vision-only Sudoku solver for `https://sudoku.com/` with a **server/client** architecture:
 
-- grid detection with OpenCV,
-- OCR with **Tesseract only**,
-- Sudoku solve with backtracking,
-- browser autofill via `pyautogui`.
+- **Solver API (server)**: OpenCV + Tesseract + Sudoku solver, exposed over HTTP.
+- **Live client**: captures screenshots, sends to API, autofills the browser.
 
-No DOM parsing is used for grid perception.
+No DOM parsing is used for grid/digit perception.
 
-## Quick start
+## Architecture
+
+- `api/app.py`: HTTP API (`/predict`, `/predict_debug`)
+- `src/pipeline.py`: detect -> OCR -> solve
+- `scripts/live_solve.py`: local client (capture + API call + typing)
+- `Dockerfile`: dockerized API server
+
+## Quick start (local dev)
 
 ```bash
 python3 -m venv .venv
@@ -17,47 +22,65 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Main commands
-
-- Run API: `make api`
-- Run live solver: `make live-solve`
-- Save debug image from API: `make debug-image IMAGE="/path/to/image.png" OUT="debug.png"`
-- Generate OCR-prefilled manifest from screenshots: `make generate-manifest MANIFEST_INPUT="data/raw_screenshots" MANIFEST_OUT="data/manifest_autogen.json"`
-- Capture screenshots loop: `make capture-dataset CAPTURE_OUT="data/raw_screenshots"`
-
-## Live solve
-
-```bash
-.venv/bin/python -m scripts.live_solve --min-clues 17
-```
-
-Optional direct calibration values:
-
-```bash
-.venv/bin/python -m scripts.live_solve --x 320 --y 195 --size 517 --min-clues 17
-```
-
-## API
-
-Start:
+Run API locally:
 
 ```bash
 make api
 ```
 
-Predict:
+Run client locally:
+
+```bash
+make live-solve
+```
+
+## Dockerized solver API
+
+Build and run:
+
+```bash
+make docker-build
+make docker-run
+```
+
+This starts the solver API at `http://localhost:8080`.
+
+Health check:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Predict from an image:
 
 ```bash
 curl -X POST "http://localhost:8080/predict" -F "file=@/path/to/image.png"
 ```
 
-Predict with debug overlay:
+## Client usage (screenshots + auto resolution)
+
+The client runs on host machine (needs screen and keyboard/mouse access), calls API:
 
 ```bash
-curl -X POST "http://localhost:8080/predict_debug" -F "file=@/path/to/image.png"
+.venv/bin/python -m scripts.live_solve
 ```
+
+Behavior is fixed by design:
+- API endpoint: `http://localhost:8080/predict`
+- API timeout: `120s`
+- minimum clues: `17` (minimum valid Sudoku clues)
+- interactive calibration on each run
+
+## Other useful commands
+
+- Save debug overlay from API:
+  - `make debug-image IMAGE="/path/to/image.png" OUT="debug.png"`
+- Generate OCR-prefilled manifest:
+  - `make generate-manifest MANIFEST_INPUT="data/raw_screenshots" MANIFEST_OUT="data/manifest_autogen.json"`
+- Capture screenshot dataset loop:
+  - `make capture-dataset CAPTURE_OUT="data/raw_screenshots"`
 
 ## Notes
 
-- Tesseract binary must be installed and available in `PATH` (or in standard macOS Homebrew paths).
-- On macOS, grant **Screen Recording** and **Accessibility** permissions for terminal/IDE when using live mode.
+- Docker image already installs `tesseract-ocr` for server-side OCR.
+- On macOS, grant **Screen Recording** and **Accessibility** to terminal/IDE for live client automation.
