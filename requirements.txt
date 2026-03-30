@@ -1,0 +1,7 @@
+flask
+numpy
+opencv-python
+Pillow
+ultralytics
+pyautogui
+pytesseract
