@@ -120,6 +120,27 @@ def _parse_actions(raw_actions: object) -> List[Tuple[int, int, int]]:
     return actions
 
 
+def _parse_grid(raw_grid: object) -> List[List[int]]:
+    if not isinstance(raw_grid, list) or len(raw_grid) != 9:
+        return []
+    out: List[List[int]] = []
+    for row in raw_grid:
+        if not isinstance(row, list) or len(row) != 9:
+            return []
+        out.append([int(v) for v in row])
+    return out
+
+
+def _actions_from_solved_grid(solved_grid: List[List[int]]) -> List[Tuple[int, int, int]]:
+    actions: List[Tuple[int, int, int]] = []
+    for r in range(9):
+        for c in range(9):
+            value = solved_grid[r][c]
+            if 1 <= value <= 9:
+                actions.append((r, c, value))
+    return actions
+
+
 def _encode_multipart_formdata(field_name: str, filename: str, data: bytes, content_type: str) -> tuple[bytes, str]:
     boundary = f"----sudoku-live-{uuid.uuid4().hex}"
     parts = [
@@ -220,7 +241,10 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
     status = str(result.get("status", "unknown"))
     solved = bool(result.get("solved", False))
     clues = int(result.get("num_clues_detected", 0))
-    actions = _parse_actions(result.get("actions"))
+    solved_grid = _parse_grid(result.get("solved_grid"))
+    # Robust mode: type full solved grid (sites ignore prefilled cells).
+    # Fallback to API actions only if solved_grid is unavailable.
+    actions = _actions_from_solved_grid(solved_grid) if solved_grid else _parse_actions(result.get("actions"))
     centers = _build_cell_centers(calibration, image)
     print(f"parsed_actions={len(actions)} detected_cell_centers={len(centers)}")
     _log(f"Validation gate: status={status}, solved={solved}, clues={clues}, actions={len(actions)}")
