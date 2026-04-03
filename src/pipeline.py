@@ -10,6 +10,8 @@ from src.detection.interface import CellBox, crop_cell, detect_cells
 from src.ocr.tesseract import read_digit_candidates_tesseract_relaxed, read_digit_with_confidence_tesseract
 from src.solver.backtracking import count_solutions_with_budget, solve_sudoku_with_budget
 
+MIN_GIVEN_CONFIDENCE = 0.60
+
 
 def _build_grid(
     image: np.ndarray,
@@ -128,6 +130,19 @@ def _prune_conflicting_digits(grid: List[List[int]], confidence: List[List[float
                 changed = dedupe_unit(coords) or changed
 
 
+def _drop_low_confidence_clues(grid: List[List[int]], confidence: List[List[float]], min_conf: float) -> int:
+    dropped = 0
+    for r in range(9):
+        for c in range(9):
+            if grid[r][c] == 0:
+                continue
+            if confidence[r][c] < min_conf:
+                grid[r][c] = 0
+                confidence[r][c] = 0.0
+                dropped += 1
+    return dropped
+
+
 def _is_consistent(grid: List[List[int]]) -> bool:
     # Check rows and columns.
     for i in range(9):
@@ -199,6 +214,7 @@ def _run_pipeline_internal(
     t0 = time.perf_counter()
     _prune_conflicting_digits(grid, confidence)
     t_prune = (time.perf_counter() - t0) * 1000.0
+    dropped_low_conf = _drop_low_confidence_clues(grid, confidence, min_conf=MIN_GIVEN_CONFIDENCE)
 
     result = _solve_from_grid(
         grid=grid,
@@ -228,6 +244,7 @@ def _run_pipeline_internal(
     result["timing_ms"]["detect"] = round(t_detect, 2)
     result["timing_ms"]["ocr"] = round(t_ocr, 2)
     result["timing_ms"]["prune"] = round(t_prune, 2)
+    result["num_low_conf_clues_dropped"] = dropped_low_conf
 
     t0 = time.perf_counter()
     debug_image = _render_debug_overlay(image, boxes, result["initial_grid"], confidence) if with_debug_overlay else None
