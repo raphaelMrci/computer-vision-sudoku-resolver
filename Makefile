@@ -27,7 +27,7 @@ generate-manifest:
 	$(PYTHON) -m scripts.generate_manifest --input-dir "$(MANIFEST_INPUT)" --out "$(MANIFEST_OUT)" --prefill-ocr
 
 live-solve:
-	$(PYTHON) -m scripts.live_solve
+	$(PYTHON) -m scripts.live_solve $(ARGS)
 
 capture-dataset:
 	$(PYTHON) -m scripts.capture_dataset_loop --out-dir "$(CAPTURE_OUT)" --interval $(CAPTURE_INTERVAL) --prefix "$(CAPTURE_PREFIX)" --countdown

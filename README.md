@@ -71,6 +71,34 @@ Behavior is fixed by design:
 - minimum clues: `17` (minimum valid Sudoku clues)
 - interactive calibration on each run
 
+Loop mode (infinite benchmark):
+
+```bash
+.venv/bin/python -m scripts.live_solve --loop
+```
+
+Save config once (grid + loop buttons), then reuse automatically:
+
+```bash
+.venv/bin/python -m scripts.live_solve --save-config
+```
+
+In loop mode, the client asks for:
+- screenshot area (grid),
+- `New game` and `Extreme` button positions for SUCCESS screen,
+- `New game` and `Extreme` button positions for FAILED screen.
+
+Then `--loop` runs forever, tracking:
+- launched games,
+- successes,
+- failures,
+- success rate (%).
+
+Safety:
+- move mouse to top-left screen corner (pyautogui fail-safe),
+- or press `Ctrl+C`,
+- auto-stop after too many consecutive failures.
+
 ## Other useful commands
 
 - Save debug overlay from API:
