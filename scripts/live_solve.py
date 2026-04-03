@@ -23,6 +23,7 @@ MIN_CLUES = 17
 COUNTDOWN_S = 3
 MAX_CONSECUTIVE_FAILURES = 10
 DEFAULT_CONFIG_PATH = Path("data/live_solve_config.json")
+STATS_LOG_PATH = Path("data/live_solve_stats.jsonl")
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,6 +108,12 @@ def _load_config(path: Path) -> dict | None:
 def _save_config(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2))
+
+
+def _append_stats_event(path: Path, event: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event, separators=(",", ":")) + "\n")
 
 
 def _parse_actions(raw_actions: object) -> List[Tuple[int, int, int]]:
@@ -210,8 +217,15 @@ def _start_new_extreme_game(
     time.sleep(0.50)
 
 
-def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, str]:
+def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, str, dict]:
     t_main_start = time.perf_counter()
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    capture_ms = 0.0
+    infer_ms = 0.0
+    fill_ms = 0.0
+    status = "unknown"
+    clues = 0
+    actions_count = 0
     _log("Capture phase started.")
     _countdown(COUNTDOWN_S, "Capturing grid")
     t0 = time.perf_counter()
@@ -228,7 +242,19 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
         print("Quick checks:")
         print("- curl http://localhost:8080/health")
         print("- make docker-run  (or make api)")
-        return False, "api_error"
+        total_ms = (time.perf_counter() - t_main_start) * 1000.0
+        return False, "api_error", {
+            "ts": ts,
+            "ok": False,
+            "reason": "api_error",
+            "status": status,
+            "clues": clues,
+            "actions": actions_count,
+            "capture_ms": round(capture_ms, 1),
+            "infer_ms": round(infer_ms, 1),
+            "fill_ms": round(fill_ms, 1),
+            "total_ms": round(total_ms, 1),
+        }
     infer_ms = (time.perf_counter() - t0) * 1000.0
     _log(
         f"API inference done (status={result.get('status')}, solved={result.get('solved')}, "
@@ -245,18 +271,43 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
     # Robust mode: type full solved grid (sites ignore prefilled cells).
     # Fallback to API actions only if solved_grid is unavailable.
     actions = _actions_from_solved_grid(solved_grid) if solved_grid else _parse_actions(result.get("actions"))
+    actions_count = len(actions)
     centers = _build_cell_centers(calibration, image)
     print(f"parsed_actions={len(actions)} detected_cell_centers={len(centers)}")
     _log(f"Validation gate: status={status}, solved={solved}, clues={clues}, actions={len(actions)}")
 
     if not solved or not actions or status != "ok":
         print("Abort: puzzle not in a safe solved state.")
-        return False, "unsolved_or_unsafe"
+        total_ms = (time.perf_counter() - t_main_start) * 1000.0
+        return False, "unsolved_or_unsafe", {
+            "ts": ts,
+            "ok": False,
+            "reason": "unsolved_or_unsafe",
+            "status": status,
+            "clues": clues,
+            "actions": actions_count,
+            "capture_ms": round(capture_ms, 1),
+            "infer_ms": round(infer_ms, 1),
+            "fill_ms": round(fill_ms, 1),
+            "total_ms": round(total_ms, 1),
+        }
     if clues < MIN_CLUES:
         print(f"Abort: detected clues {clues} < min-clues {MIN_CLUES}.")
-        return False, "too_few_clues"
+        total_ms = (time.perf_counter() - t_main_start) * 1000.0
+        return False, "too_few_clues", {
+            "ts": ts,
+            "ok": False,
+            "reason": "too_few_clues",
+            "status": status,
+            "clues": clues,
+            "actions": actions_count,
+            "capture_ms": round(capture_ms, 1),
+            "infer_ms": round(infer_ms, 1),
+            "fill_ms": round(fill_ms, 1),
+            "total_ms": round(total_ms, 1),
+        }
 
-    _countdown(COUNTDOWN_S, "Auto-fill starts")
+    _log("Auto-fill starts immediately.")
     # Prime focus on the first target action cell (empty by design), not on arbitrary (0,0).
     if actions:
         first_row, first_col, _ = actions[0]
@@ -276,7 +327,18 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
     total_ms = (time.perf_counter() - t_main_start) * 1000.0
     print(f"timings_ms fill_phase={fill_ms:.1f} total={total_ms:.1f}")
     print("Done.")
-    return True, "ok"
+    return True, "ok", {
+        "ts": ts,
+        "ok": True,
+        "reason": "ok",
+        "status": status,
+        "clues": clues,
+        "actions": actions_count,
+        "capture_ms": round(capture_ms, 1),
+        "infer_ms": round(infer_ms, 1),
+        "fill_ms": round(fill_ms, 1),
+        "total_ms": round(total_ms, 1),
+    }
 
 
 def main() -> int:
@@ -338,7 +400,10 @@ def main() -> int:
         return 0
 
     if not args.loop:
-        ok, _reason = _run_single_attempt(pyautogui, calibration)
+        ok, reason, metrics = _run_single_attempt(pyautogui, calibration)
+        metrics["mode"] = "single"
+        _append_stats_event(STATS_LOG_PATH, metrics)
+        _log(f"Stats appended to {STATS_LOG_PATH} (result={reason}).")
         return 0 if ok else 1
 
     _log("Loop mode enabled.")
@@ -364,7 +429,10 @@ def main() -> int:
         while True:
             game_idx = total + 1
             _log(f"=== Game #{game_idx} ===")
-            ok, reason = _run_single_attempt(pyautogui, calibration)
+            ok, reason, metrics = _run_single_attempt(pyautogui, calibration)
+            metrics["mode"] = "loop"
+            metrics["game_idx"] = game_idx
+            _append_stats_event(STATS_LOG_PATH, metrics)
             total += 1
             if ok:
                 success += 1
