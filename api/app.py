@@ -20,14 +20,13 @@ def health() -> tuple[str, int]:
 
 @app.get("/")
 def index():
-    return jsonify(
-        {
-            "service": "sudoku-vision-api",
-            "endpoints": ["/health", "/predict", "/predict_debug"],
-            "ocr_modes": ["tesseract"],
-            "example_curl": 'curl -X POST "http://localhost:8080/predict" -F "file=@/path/to/image.png"',
-        }
-    )
+    payload = {
+        "service": "sudoku-vision-api",
+        "endpoints": ["/health", "/predict", "/predict_debug"],
+        "ocr_modes": ["tesseract"],
+        "example_curl": 'curl -X POST "http://localhost:8080/predict" -F "file=@/path/to/image.png"',
+    }
+    return jsonify(payload)
 
 
 def _load_uploaded_image():

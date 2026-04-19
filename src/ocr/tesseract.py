@@ -17,14 +17,12 @@ MIN_CONFIDENCE = 28.0
 
 @lru_cache(maxsize=1)
 def _has_tesseract() -> bool:
-    # Backend 1: pytesseract Python package.
     try:
         import pytesseract  # type: ignore
         _ = pytesseract.get_tesseract_version()
         return True
     except Exception:
         pass
-    # Backend 2: direct Tesseract CLI binary.
     return _resolve_tesseract_binary() is not None
 
 
@@ -48,7 +46,6 @@ def _resolve_tesseract_binary() -> Optional[str]:
 def _prepare_cell(cell_image: np.ndarray, adaptive: bool = False, crop_ratio: float = 0.08) -> np.ndarray:
     gray = cv2.cvtColor(cell_image, cv2.COLOR_RGB2GRAY)
     h, w = gray.shape
-    # Keep most of the glyph: previous 20% crop was too aggressive.
     py = max(0, int(h * crop_ratio))
     px = max(0, int(w * crop_ratio))
     roi = gray[py : h - py, px : w - px]
@@ -292,7 +289,6 @@ def read_digit_with_confidence_tesseract(cell_image: np.ndarray) -> Tuple[int, f
     if _is_empty(bw_otsu) and _is_empty(bw_adapt):
         return 0, 0.0
 
-    # Prefer pytesseract when available (faster than spawning CLI every cell).
     try:
         import pytesseract  # type: ignore
         best_digit = 0
@@ -337,7 +333,6 @@ def read_digit_candidates_tesseract_relaxed(
         _prepare_cell(cell_image, adaptive=False, crop_ratio=0.12),
         _prepare_cell(cell_image, adaptive=True, crop_ratio=0.12),
     ]
-    # Only skip as empty when all variants are close to blank.
     if all(_is_empty(v) for v in variants):
         return []
 

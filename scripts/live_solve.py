@@ -138,6 +138,23 @@ def _parse_grid(raw_grid: object) -> List[List[int]]:
     return out
 
 
+def _base_metrics(ts: str, status: str, clues: int, actions_count: int) -> dict:
+    return {
+        "ts": ts,
+        "status": status,
+        "clues": clues,
+        "actions": actions_count,
+    }
+
+
+def _finalize_metrics(metrics: dict, capture_ms: float, infer_ms: float, fill_ms: float, total_ms: float) -> dict:
+    metrics["capture_ms"] = round(capture_ms, 1)
+    metrics["infer_ms"] = round(infer_ms, 1)
+    metrics["fill_ms"] = round(fill_ms, 1)
+    metrics["total_ms"] = round(total_ms, 1)
+    return metrics
+
+
 def _actions_from_solved_grid(solved_grid: List[List[int]]) -> List[Tuple[int, int, int]]:
     actions: List[Tuple[int, int, int]] = []
     for r in range(9):
@@ -243,18 +260,10 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
         print("- curl http://localhost:8080/health")
         print("- make docker-run  (or make api)")
         total_ms = (time.perf_counter() - t_main_start) * 1000.0
-        return False, "api_error", {
-            "ts": ts,
-            "ok": False,
-            "reason": "api_error",
-            "status": status,
-            "clues": clues,
-            "actions": actions_count,
-            "capture_ms": round(capture_ms, 1),
-            "infer_ms": round(infer_ms, 1),
-            "fill_ms": round(fill_ms, 1),
-            "total_ms": round(total_ms, 1),
-        }
+        metrics = _base_metrics(ts, status, clues, actions_count)
+        metrics["ok"] = False
+        metrics["reason"] = "api_error"
+        return False, "api_error", _finalize_metrics(metrics, capture_ms, infer_ms, fill_ms, total_ms)
     infer_ms = (time.perf_counter() - t0) * 1000.0
     _log(
         f"API inference done (status={result.get('status')}, solved={result.get('solved')}, "
@@ -268,8 +277,6 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
     solved = bool(result.get("solved", False))
     clues = int(result.get("num_clues_detected", 0))
     solved_grid = _parse_grid(result.get("solved_grid"))
-    # Robust mode: type full solved grid (sites ignore prefilled cells).
-    # Fallback to API actions only if solved_grid is unavailable.
     actions = _actions_from_solved_grid(solved_grid) if solved_grid else _parse_actions(result.get("actions"))
     actions_count = len(actions)
     centers = _build_cell_centers(calibration, image)
@@ -279,36 +286,19 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
     if not solved or not actions or status != "ok":
         print("Abort: puzzle not in a safe solved state.")
         total_ms = (time.perf_counter() - t_main_start) * 1000.0
-        return False, "unsolved_or_unsafe", {
-            "ts": ts,
-            "ok": False,
-            "reason": "unsolved_or_unsafe",
-            "status": status,
-            "clues": clues,
-            "actions": actions_count,
-            "capture_ms": round(capture_ms, 1),
-            "infer_ms": round(infer_ms, 1),
-            "fill_ms": round(fill_ms, 1),
-            "total_ms": round(total_ms, 1),
-        }
+        metrics = _base_metrics(ts, status, clues, actions_count)
+        metrics["ok"] = False
+        metrics["reason"] = "unsolved_or_unsafe"
+        return False, "unsolved_or_unsafe", _finalize_metrics(metrics, capture_ms, infer_ms, fill_ms, total_ms)
     if clues < MIN_CLUES:
         print(f"Abort: detected clues {clues} < min-clues {MIN_CLUES}.")
         total_ms = (time.perf_counter() - t_main_start) * 1000.0
-        return False, "too_few_clues", {
-            "ts": ts,
-            "ok": False,
-            "reason": "too_few_clues",
-            "status": status,
-            "clues": clues,
-            "actions": actions_count,
-            "capture_ms": round(capture_ms, 1),
-            "infer_ms": round(infer_ms, 1),
-            "fill_ms": round(fill_ms, 1),
-            "total_ms": round(total_ms, 1),
-        }
+        metrics = _base_metrics(ts, status, clues, actions_count)
+        metrics["ok"] = False
+        metrics["reason"] = "too_few_clues"
+        return False, "too_few_clues", _finalize_metrics(metrics, capture_ms, infer_ms, fill_ms, total_ms)
 
     _log("Auto-fill starts immediately.")
-    # Prime focus on the first target action cell (empty by design), not on arbitrary (0,0).
     if actions:
         first_row, first_col, _ = actions[0]
         if (first_row, first_col) in centers:
@@ -327,18 +317,10 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
     total_ms = (time.perf_counter() - t_main_start) * 1000.0
     print(f"timings_ms fill_phase={fill_ms:.1f} total={total_ms:.1f}")
     print("Done.")
-    return True, "ok", {
-        "ts": ts,
-        "ok": True,
-        "reason": "ok",
-        "status": status,
-        "clues": clues,
-        "actions": actions_count,
-        "capture_ms": round(capture_ms, 1),
-        "infer_ms": round(infer_ms, 1),
-        "fill_ms": round(fill_ms, 1),
-        "total_ms": round(total_ms, 1),
-    }
+    metrics = _base_metrics(ts, status, clues, actions_count)
+    metrics["ok"] = True
+    metrics["reason"] = "ok"
+    return True, "ok", _finalize_metrics(metrics, capture_ms, infer_ms, fill_ms, total_ms)
 
 
 def main() -> int:

@@ -50,57 +50,7 @@ def _is_valid_assignment(grid: Grid, row: int, col: int, value: int) -> bool:
     return True
 
 
-def solve_sudoku(grid: Grid) -> bool:
-    """
-    Solve grid in-place. Return True if solved.
-    Empty cells must be encoded with 0.
-    """
-    next_cell = _find_empty_with_mrv(grid)
-    if next_cell is None:
-        return True
-
-    row, col = next_cell
-    for value in _candidates(grid, row, col):
-        if not _is_valid_assignment(grid, row, col, value):
-            continue
-        grid[row][col] = value
-        if solve_sudoku(grid):
-            return True
-        grid[row][col] = 0
-
-    return False
-
-
-def count_solutions(grid: Grid, limit: int = 2) -> int:
-    """
-    Count number of solutions up to `limit`.
-    Useful to detect ambiguous OCR-derived puzzles.
-    """
-    if limit <= 0:
-        return 0
-
-    next_cell = _find_empty_with_mrv(grid)
-    if next_cell is None:
-        return 1
-
-    row, col = next_cell
-    total = 0
-    for value in _candidates(grid, row, col):
-        if not _is_valid_assignment(grid, row, col, value):
-            continue
-        grid[row][col] = value
-        total += count_solutions(grid, limit=limit - total)
-        grid[row][col] = 0
-        if total >= limit:
-            return limit
-    return total
-
-
 def solve_sudoku_with_budget(grid: Grid, max_nodes: int) -> Tuple[bool, bool]:
-    """
-    Solve with a recursion node budget.
-    Returns (solved, budget_exhausted).
-    """
     budget = [max_nodes]
 
     def _solve() -> Tuple[bool, bool]:
@@ -130,10 +80,6 @@ def solve_sudoku_with_budget(grid: Grid, max_nodes: int) -> Tuple[bool, bool]:
 
 
 def count_solutions_with_budget(grid: Grid, limit: int, max_nodes: int) -> Tuple[int, bool]:
-    """
-    Count solutions up to `limit` with a recursion node budget.
-    Returns (count, budget_exhausted).
-    """
     budget = [max_nodes]
 
     def _count(local_limit: int) -> Tuple[int, bool]:

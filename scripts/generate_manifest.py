@@ -10,12 +10,7 @@ from PIL import Image
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Generate manifest JSON from screenshot directory. "
-            "Optionally prefill grid with OCR predictions."
-        )
-    )
+    parser = argparse.ArgumentParser(description="Generate manifest JSON from screenshots.")
     parser.add_argument(
         "--input-dir",
         default="data/raw_screenshots",
@@ -34,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prefill-ocr",
         action="store_true",
-        help="Fill grid with OCR prediction to create a train-ready manifest quickly.",
+        help="Fill grid with OCR prediction.",
     )
     parser.add_argument(
         "--ocr-mode",

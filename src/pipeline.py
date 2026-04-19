@@ -11,6 +11,8 @@ from src.ocr.tesseract import read_digit_candidates_tesseract_relaxed, read_digi
 from src.solver.backtracking import count_solutions_with_budget, solve_sudoku_with_budget
 
 MIN_GIVEN_CONFIDENCE = 0.60
+UNCERTAIN_CLUE_THRESHOLD = 0.72
+CONFIDENT_CLUE_THRESHOLD = 0.86
 
 
 def _build_grid(
@@ -18,6 +20,7 @@ def _build_grid(
     cell_boxes: List[CellBox],
     ocr_mode: str,
 ) -> Tuple[List[List[int]], List[List[float]]]:
+    _ = ocr_mode
     grid = [[0 for _ in range(9)] for _ in range(9)]
     confidence = [[0.0 for _ in range(9)] for _ in range(9)]
     for box in cell_boxes:
@@ -42,7 +45,11 @@ def _count_clues(grid: List[List[int]]) -> int:
 
 
 def _confidence_stats(grid: List[List[int]], confidence: List[List[float]]) -> Dict[str, float]:
-    values = [confidence[r][c] for r in range(9) for c in range(9) if grid[r][c] != 0]
+    values: List[float] = []
+    for r in range(9):
+        for c in range(9):
+            if grid[r][c] != 0:
+                values.append(confidence[r][c])
     if not values:
         return {"ocr_confidence_mean": 0.0, "ocr_confidence_min": 0.0, "ocr_confidence_max": 0.0}
     return {
@@ -54,28 +61,34 @@ def _confidence_stats(grid: List[List[int]], confidence: List[List[float]]) -> D
 
 
 def _uncertainty_stats(grid: List[List[int]], confidence: List[List[float]]) -> Dict[str, float]:
-    clues = [(r, c) for r in range(9) for c in range(9) if grid[r][c] != 0]
-    if not clues:
+    clue_count = 0
+    uncertain = 0
+    confident = 0
+    quality_sum = 0.0
+
+    for r in range(9):
+        for c in range(9):
+            if grid[r][c] == 0:
+                continue
+            clue_count += 1
+            conf = confidence[r][c]
+            quality_sum += conf
+            if conf < UNCERTAIN_CLUE_THRESHOLD:
+                uncertain += 1
+            if conf >= CONFIDENT_CLUE_THRESHOLD:
+                confident += 1
+
+    if clue_count == 0:
         return {
             "num_uncertain_clues": 0,
             "num_confident_clues": 0,
             "clue_quality_score": 0.0,
         }
-    uncertain = 0
-    confident = 0
-    quality = 0.0
-    for r, c in clues:
-        conf = confidence[r][c]
-        if conf < 0.72:
-            uncertain += 1
-        if conf >= 0.86:
-            confident += 1
-        quality += conf
-    quality /= len(clues)
+
     return {
         "num_uncertain_clues": uncertain,
         "num_confident_clues": confident,
-        "clue_quality_score": float(quality),
+        "clue_quality_score": float(quality_sum / clue_count),
     }
 
 
@@ -85,17 +98,12 @@ def _uncertain_cells(grid: List[List[int]], confidence: List[List[float]]) -> Li
         for c in range(9):
             value = grid[r][c]
             conf = confidence[r][c]
-            if value != 0 and conf < 0.72:
+            if value != 0 and conf < UNCERTAIN_CLUE_THRESHOLD:
                 cells.append([r, c, value, round(conf, 4)])
     return cells
 
 
 def _prune_conflicting_digits(grid: List[List[int]], confidence: List[List[float]]) -> None:
-    """
-    Remove OCR conflicts by keeping, for each duplicate digit in a unit,
-    the cell with the highest confidence and zeroing others.
-    """
-
     def dedupe_unit(coords: List[Tuple[int, int]]) -> bool:
         changed = False
         by_digit: Dict[int, List[Tuple[int, int]]] = {}
@@ -117,16 +125,25 @@ def _prune_conflicting_digits(grid: List[List[int]], confidence: List[List[float
                 changed = True
         return changed
 
+    def row_coords(row: int) -> List[Tuple[int, int]]:
+        return [(row, col) for col in range(9)]
+
+    def col_coords(col: int) -> List[Tuple[int, int]]:
+        return [(row, col) for row in range(9)]
+
+    def box_coords(box_r: int, box_c: int) -> List[Tuple[int, int]]:
+        return [(r, c) for r in range(box_r, box_r + 3) for c in range(box_c, box_c + 3)]
+
     changed = True
     while changed:
         changed = False
         for row in range(9):
-            changed = dedupe_unit([(row, col) for col in range(9)]) or changed
+            changed = dedupe_unit(row_coords(row)) or changed
         for col in range(9):
-            changed = dedupe_unit([(row, col) for row in range(9)]) or changed
+            changed = dedupe_unit(col_coords(col)) or changed
         for box_r in range(0, 9, 3):
             for box_c in range(0, 9, 3):
-                coords = [(r, c) for r in range(box_r, box_r + 3) for c in range(box_c, box_c + 3)]
+                coords = box_coords(box_r, box_c)
                 changed = dedupe_unit(coords) or changed
 
 
@@ -144,7 +161,6 @@ def _drop_low_confidence_clues(grid: List[List[int]], confidence: List[List[floa
 
 
 def _is_consistent(grid: List[List[int]]) -> bool:
-    # Check rows and columns.
     for i in range(9):
         row_vals = [v for v in grid[i] if v != 0]
         col_vals = [grid[r][i] for r in range(9) if grid[r][i] != 0]
@@ -153,7 +169,6 @@ def _is_consistent(grid: List[List[int]]) -> bool:
         if len(col_vals) != len(set(col_vals)):
             return False
 
-    # Check 3x3 sub-grids.
     for box_r in range(0, 9, 3):
         for box_c in range(0, 9, 3):
             vals = []
@@ -200,7 +215,6 @@ def _run_pipeline_internal(
     ocr_mode: str = "tesseract",
 ) -> Tuple[Dict[str, object], Optional[np.ndarray]]:
     t_start = time.perf_counter()
-    # Pipeline is intentionally tesseract-only now.
     ocr_mode = "tesseract"
 
     t0 = time.perf_counter()
@@ -222,11 +236,12 @@ def _run_pipeline_internal(
         ocr_mode=ocr_mode,
         num_cells_detected=len(boxes),
     )
-    if (
+    needs_recovery = (
         not bool(result.get("solved", False))
         and int(result.get("solution_count_capped", 0)) >= 2
         and int(result.get("num_clues_detected", 0)) >= 17
-    ):
+    )
+    if needs_recovery:
         recovered = _recover_missing_givens_for_ambiguity(image, boxes, grid, confidence)
         if recovered is not None:
             rec_grid, rec_conf, rec_count = recovered
@@ -260,7 +275,6 @@ def _recover_missing_givens_for_ambiguity(
     grid: List[List[int]],
     confidence: List[List[float]],
 ) -> Optional[Tuple[List[List[int]], List[List[float]], int]]:
-    # Build relaxed proposals only for currently empty cells.
     box_by_rc = {(b.row, b.col): b for b in boxes}
     proposals: List[Tuple[int, int, int, float]] = []
     for r in range(9):
@@ -278,7 +292,6 @@ def _recover_missing_givens_for_ambiguity(
     if not proposals:
         return None
 
-    # Keep strongest proposals and avoid too many branches.
     proposals.sort(key=lambda item: item[3], reverse=True)
     proposals = proposals[:18]
     seen_rc = set()
@@ -322,13 +335,11 @@ def _recover_missing_givens_for_ambiguity(
             return None
         return g, conf, len(added)
 
-    # Try single clue additions first.
     for p in top_single:
         tried = try_grid_with_added([p])
         if tried is not None:
             return tried
 
-    # Then pairs among strongest proposals from distinct cells.
     pair_pool = top_single[:10]
     for i in range(len(pair_pool)):
         for j in range(i + 1, len(pair_pool)):
@@ -350,9 +361,9 @@ def _solve_from_grid(
 ) -> Dict[str, object]:
     initial = [row[:] for row in grid]
     clues = _count_clues(initial)
-    is_consistent = _is_consistent(initial)
+    grid_is_consistent = _is_consistent(initial)
     uncertainty_metrics = _uncertainty_stats(initial, confidence)
-    solve_eligible = clues >= 17 and is_consistent
+    solve_eligible = clues >= 17 and grid_is_consistent
     is_solved = False
     solved = [row[:] for row in initial]
     clues_used = [row[:] for row in initial]
@@ -378,11 +389,9 @@ def _solve_from_grid(
 
     actions: List[Tuple[int, int, int]] = []
     if is_solved:
-        # IMPORTANT: fill only cells that OCR initially considered empty.
-        # Never type into cells that were only removed during relaxation.
         actions = _actions_from_solution(initial, solved)
 
-    if not is_consistent:
+    if not grid_is_consistent:
         status = "invalid_grid_from_detection_or_ocr"
     elif clues < 17:
         status = "insufficient_clues_for_reliable_solve"
@@ -433,7 +442,6 @@ def run_pipeline_from_grid(
     confidence_grid: List[List[float]],
     ocr_mode: str = "tesseract",
 ) -> Dict[str, object]:
-    # Keep same output contract as image-based pipeline.
     return _solve_from_grid(
         grid=[row[:] for row in initial_grid],
         confidence=[row[:] for row in confidence_grid],

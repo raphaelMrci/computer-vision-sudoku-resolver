@@ -33,11 +33,6 @@ def fill_grid(
     click_interval_s: float = 0.03,
     key_interval_s: float = 0.015,
 ) -> None:
-    """
-    Fill Sudoku grid using keyboard automation.
-
-    If no calibration is provided, this function logs actions only.
-    """
     if calibration is None and cell_centers is None:
         for row, col, value in actions:
             print(f"[automation] set cell ({row}, {col}) = {value}")

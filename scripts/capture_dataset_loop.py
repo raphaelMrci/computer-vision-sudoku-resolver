@@ -36,11 +36,7 @@ class LoopConfig:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Collect Sudoku screenshots in a loop: wait -> screenshot -> click New Game -> click Easy."
-        )
-    )
+    parser = argparse.ArgumentParser(description="Collect Sudoku screenshots in a loop.")
     parser.add_argument("--out-dir", default="data/raw_screenshots", help="Output folder for screenshots.")
     parser.add_argument("--interval", type=float, default=3.0, help="Seconds before each screenshot.")
     parser.add_argument("--click-delay", type=float, default=0.35, help="Delay between button clicks.")
@@ -122,7 +118,7 @@ def main() -> int:
     config_path.write_text(json.dumps(asdict(config), indent=2))
     print(f"Saved calibration config to: {config_path}")
 
-    print("Starting capture loop. Press Ctrl+C to stop.")
+    print("Starting capture loop. Ctrl+C to stop.")
     index = 0
     try:
         while True:

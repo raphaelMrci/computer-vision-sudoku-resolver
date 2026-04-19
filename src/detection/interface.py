@@ -18,11 +18,6 @@ class CellBox:
 
 
 def detect_cells(image: np.ndarray) -> List[CellBox]:
-    """
-    Detect the global Sudoku grid bounding box, then split it into 9x9 cells.
-
-    This is a classical CV fallback before integrating a fine-tuned detector.
-    """
     x, y, side = _detect_grid_square(image)
     cell_w = side // 9
     cell_h = side // 9
