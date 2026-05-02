@@ -28,22 +28,9 @@ STATS_LOG_PATH = Path("data/live_solve_stats.jsonl")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Live Sudoku client.")
-    parser.add_argument(
-        "--loop",
-        action="store_true",
-        help="Infinite mode: auto-start new Extreme game after each attempt.",
-    )
-    parser.add_argument(
-        "--save-config",
-        action="store_true",
-        help="Only capture UI positions and save config, then exit.",
-    )
+    parser.add_argument("--loop", action="store_true", help="Loop forever.")
+    parser.add_argument("--save-config", action="store_true", help="Save clicks to config file.")
     return parser.parse_args()
-
-
-def _log(message: str) -> None:
-    ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {message}")
 
 
 def _require_pyautogui():
@@ -56,10 +43,8 @@ def _require_pyautogui():
     return pyautogui
 
 
-def _countdown(seconds: int, message: str) -> None:
-    for i in range(seconds, 0, -1):
-        print(f"{message} in {i}...")
-        time.sleep(1)
+def _pause(seconds: int) -> None:
+    time.sleep(seconds)
 
 
 def _capture_region(pyautogui, calibration: GridCalibration) -> np.ndarray:
@@ -70,26 +55,21 @@ def _capture_region(pyautogui, calibration: GridCalibration) -> np.ndarray:
 
 
 def _interactive_calibration(pyautogui) -> GridCalibration:
-    print("Move mouse to TOP-LEFT corner of Sudoku grid, then press Enter.")
+    print("top-left, enter")
     input()
     x1, y1 = pyautogui.position()
-    print(f"Captured top-left: ({x1}, {y1})")
 
-    print("Move mouse to BOTTOM-RIGHT corner of Sudoku grid, then press Enter.")
+    print("bottom-right, enter")
     input()
     x2, y2 = pyautogui.position()
-    print(f"Captured bottom-right: ({x2}, {y2})")
 
-    calibration = GridCalibration.from_corners(x1, y1, x2, y2)
-    print(f"Calibration => x={calibration.x}, y={calibration.y}, size={calibration.size}")
-    return calibration
+    return GridCalibration.from_corners(x1, y1, x2, y2)
 
 
 def _capture_point(pyautogui, prompt: str) -> Tuple[int, int]:
     print(prompt)
     input()
     x, y = pyautogui.position()
-    print(f"Captured: ({x}, {y})")
     return int(x), int(y)
 
 
@@ -243,35 +223,27 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
     status = "unknown"
     clues = 0
     actions_count = 0
-    _log("Capture phase started.")
-    _countdown(COUNTDOWN_S, "Capturing grid")
+    print("capture...")
+    _pause(COUNTDOWN_S)
     t0 = time.perf_counter()
     image = _capture_region(pyautogui, calibration)
     capture_ms = (time.perf_counter() - t0) * 1000.0
-    _log(f"Capture done ({capture_ms:.1f} ms).")
 
-    _log("Calling solver API...")
+    print("processing...")
     t0 = time.perf_counter()
     try:
         result = _predict_via_api(image)
     except RuntimeError as exc:
         print(str(exc))
-        print("Quick checks:")
-        print("- curl http://localhost:8080/health")
-        print("- make docker-run  (or make api)")
+        print("api running? try: make api")
         total_ms = (time.perf_counter() - t_main_start) * 1000.0
         metrics = _base_metrics(ts, status, clues, actions_count)
         metrics["ok"] = False
         metrics["reason"] = "api_error"
         return False, "api_error", _finalize_metrics(metrics, capture_ms, infer_ms, fill_ms, total_ms)
     infer_ms = (time.perf_counter() - t0) * 1000.0
-    _log(
-        f"API inference done (status={result.get('status')}, solved={result.get('solved')}, "
-        f"clues={result.get('num_clues_detected')}, time={infer_ms:.1f} ms)."
-    )
 
     print(json.dumps(result, indent=2))
-    print(f"timings_ms capture={capture_ms:.1f} infer={infer_ms:.1f}")
 
     status = str(result.get("status", "unknown"))
     solved = bool(result.get("solved", False))
@@ -280,25 +252,23 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
     actions = _actions_from_solved_grid(solved_grid) if solved_grid else _parse_actions(result.get("actions"))
     actions_count = len(actions)
     centers = _build_cell_centers(calibration, image)
-    print(f"parsed_actions={len(actions)} detected_cell_centers={len(centers)}")
-    _log(f"Validation gate: status={status}, solved={solved}, clues={clues}, actions={len(actions)}")
 
     if not solved or not actions or status != "ok":
-        print("Abort: puzzle not in a safe solved state.")
+        print("didn't solve, skipping fill.")
         total_ms = (time.perf_counter() - t_main_start) * 1000.0
         metrics = _base_metrics(ts, status, clues, actions_count)
         metrics["ok"] = False
         metrics["reason"] = "unsolved_or_unsafe"
         return False, "unsolved_or_unsafe", _finalize_metrics(metrics, capture_ms, infer_ms, fill_ms, total_ms)
     if clues < MIN_CLUES:
-        print(f"Abort: detected clues {clues} < min-clues {MIN_CLUES}.")
+        print(f"too few clues ({clues}), skipping.")
         total_ms = (time.perf_counter() - t_main_start) * 1000.0
         metrics = _base_metrics(ts, status, clues, actions_count)
         metrics["ok"] = False
         metrics["reason"] = "too_few_clues"
         return False, "too_few_clues", _finalize_metrics(metrics, capture_ms, infer_ms, fill_ms, total_ms)
 
-    _log("Auto-fill starts immediately.")
+    print("typing...")
     if actions:
         first_row, first_col, _ = actions[0]
         if (first_row, first_col) in centers:
@@ -315,8 +285,7 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
     fill_grid(actions, calibration=calibration, cell_centers=centers, click_interval_s=0.09, key_interval_s=0.05)
     fill_ms = (time.perf_counter() - t_fill) * 1000.0
     total_ms = (time.perf_counter() - t_main_start) * 1000.0
-    print(f"timings_ms fill_phase={fill_ms:.1f} total={total_ms:.1f}")
-    print("Done.")
+    print("done.")
     metrics = _base_metrics(ts, status, clues, actions_count)
     metrics["ok"] = True
     metrics["reason"] = "ok"
@@ -325,11 +294,8 @@ def _run_single_attempt(pyautogui, calibration: GridCalibration) -> Tuple[bool, 
 
 def main() -> int:
     args = parse_args()
-    _log("Starting live_solve client.")
     pyautogui = _require_pyautogui()
-    _log("pyautogui ready.")
-    print("Emergency stop: move mouse to top-left corner of screen (pyautogui FAILSAFE).")
-    print("Or press Ctrl+C in terminal.")
+    print("mouse top-left corner = stop")
 
     cfg = _load_config(DEFAULT_CONFIG_PATH)
     if cfg is not None:
@@ -340,55 +306,34 @@ def main() -> int:
                 y=int(grid["y"]),
                 size=int(grid["size"]),
             )
-            _log(
-                f"Loaded config from {DEFAULT_CONFIG_PATH} "
-                f"(x={calibration.x}, y={calibration.y}, size={calibration.size})."
-            )
+            print("using saved grid box")
         except Exception:
             cfg = None
     if cfg is None:
-        _log("Interactive calibration started.")
         calibration = _interactive_calibration(pyautogui)
-        _log("Interactive calibration done.")
         cfg = {
             "grid": {"x": calibration.x, "y": calibration.y, "size": calibration.size},
         }
 
     if args.save_config:
-        print("Configure loop buttons for SUCCESS case:")
-        new_game_success_pos = _capture_point(
-            pyautogui,
-            "Move mouse to NEW GAME button (SUCCESS screen), then press Enter.",
-        )
-        extreme_success_pos = _capture_point(
-            pyautogui,
-            "Move mouse to EXTREME button (SUCCESS screen), then press Enter.",
-        )
-        print("Configure loop buttons for FAILED case:")
-        new_game_failed_pos = _capture_point(
-            pyautogui,
-            "Move mouse to NEW GAME button (FAILED screen), then press Enter.",
-        )
-        extreme_failed_pos = _capture_point(
-            pyautogui,
-            "Move mouse to EXTREME button (FAILED screen), then press Enter.",
-        )
+        new_game_success_pos = _capture_point(pyautogui, "new game (win screen), enter")
+        extreme_success_pos = _capture_point(pyautogui, "extreme (win screen), enter")
+        new_game_failed_pos = _capture_point(pyautogui, "new game (lose screen), enter")
+        extreme_failed_pos = _capture_point(pyautogui, "extreme (lose screen), enter")
         cfg["loop_buttons"] = {
             "success": {"new_game": list(new_game_success_pos), "extreme": list(extreme_success_pos)},
             "failed": {"new_game": list(new_game_failed_pos), "extreme": list(extreme_failed_pos)},
         }
         _save_config(DEFAULT_CONFIG_PATH, cfg)
-        print(f"Saved config to: {DEFAULT_CONFIG_PATH}")
+        print(f"saved {DEFAULT_CONFIG_PATH}")
         return 0
 
     if not args.loop:
         ok, reason, metrics = _run_single_attempt(pyautogui, calibration)
         metrics["mode"] = "single"
         _append_stats_event(STATS_LOG_PATH, metrics)
-        _log(f"Stats appended to {STATS_LOG_PATH} (result={reason}).")
         return 0 if ok else 1
 
-    _log("Loop mode enabled.")
     loop_cfg = cfg.get("loop_buttons", {}) if isinstance(cfg, dict) else {}
     try:
         s_cfg = loop_cfg["success"]
@@ -397,10 +342,9 @@ def main() -> int:
         extreme_success_pos = (int(s_cfg["extreme"][0]), int(s_cfg["extreme"][1]))
         new_game_failed_pos = (int(f_cfg["new_game"][0]), int(f_cfg["new_game"][1]))
         extreme_failed_pos = (int(f_cfg["extreme"][0]), int(f_cfg["extreme"][1]))
-        _log(f"Loaded loop button config from {DEFAULT_CONFIG_PATH}.")
+        print("loop buttons ok")
     except Exception:
-        print("Loop button positions not configured yet.")
-        print(f"Run once: .venv/bin/python -m scripts.live_solve --save-config")
+        print("run make config first")
         return 1
 
     total = 0
@@ -410,7 +354,7 @@ def main() -> int:
     try:
         while True:
             game_idx = total + 1
-            _log(f"=== Game #{game_idx} ===")
+            print(f"game {game_idx}")
             ok, reason, metrics = _run_single_attempt(pyautogui, calibration)
             metrics["mode"] = "loop"
             metrics["game_idx"] = game_idx
@@ -423,20 +367,13 @@ def main() -> int:
                 failed += 1
                 consecutive_failures += 1
             rate = (100.0 * success / total) if total else 0.0
-            print(
-                f"[stats] games={total} success={success} failed={failed} "
-                f"success_rate={rate:.1f}% consecutive_failures={consecutive_failures} "
-                f"last_result={reason}"
-            )
+            print(f"n={total} win%={rate:.0f} last={reason} streak_fail={consecutive_failures}")
 
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                print(
-                    f"[safety] Stopping loop after {MAX_CONSECUTIVE_FAILURES} consecutive failures."
-                )
+                print(f"bailing after {MAX_CONSECUTIVE_FAILURES} fails in a row")
                 break
 
             if ok:
-                _log("Starting new Extreme game (SUCCESS buttons)...")
                 _start_new_extreme_game(
                     pyautogui,
                     new_game_success_pos,
@@ -444,18 +381,15 @@ def main() -> int:
                     pre_delay_s=1.4,
                 )
             else:
-                _log("Starting new Extreme game (FAILED buttons)...")
                 _start_new_extreme_game(pyautogui, new_game_failed_pos, extreme_failed_pos)
             time.sleep(0.8)
     except KeyboardInterrupt:
-        print("\nInterrupted by user (Ctrl+C).")
+        print("stopped (ctrl+c)")
     except Exception as exc:  # pragma: no cover
-        print(f"[fatal] Loop stopped due to error: {exc}")
+        print(f"crash: {exc}")
 
     rate = (100.0 * success / total) if total else 0.0
-    print(
-        f"[final] games={total} success={success} failed={failed} success_rate={rate:.1f}%"
-    )
+    print(f"done. n={total} win%={rate:.0f}")
     return 0
 
 
